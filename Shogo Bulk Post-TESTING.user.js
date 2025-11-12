@@ -1,7 +1,8 @@
 // ==UserScript==
-// @name         Shogo Bulk Post
-// @version      TESTING
-// @description  Bulk POST > POSTED (other status included for TS)
+// @name         Shogo Auto Post
+// @namespace    Accounting Esc
+// @version      TEST
+// @description  On the Sales Report page, select dates using a collapsible GUI with custom status input. On the Sales Summary page, update statuses via direct API calls.
 // @match        https://app.shogo.io/*
 // @grant        none
 // ==/UserScript==
@@ -9,219 +10,330 @@
 (function() {
     'use strict';
 
-    // Super duper important Pepe GIFs
+    // Super duper important pepe gifs
     const STATE_IMAGES = {
-        waiting:  "https://media.tenor.com/2NRtE9OCeKUAAAAi/pepe-tea.gif",
-        dates:    "https://media.tenor.com/EuefRl2d6bsAAAAi/pepedetective-detective.gif",
-        posting:  "https://media1.tenor.com/m/OpuD_5Bf1y8AAAAC/nerding-speech-bubble.gif",
-        done:     "https://media.tenor.com/Vw2sr_UWA6cAAAAi/pepo-party-celebrate.gif"
+        waiting: "https://media.tenor.com/2NRtE9OCeKUAAAAi/pepe-tea.gif",
+        dates:   "https://media.tenor.com/EuefRl2d6bsAAAAi/pepedetective-detective.gif",
+        posting: "https://media1.tenor.com/m/OpuD_5Bf1y8AAAAC/nerding-speech-bubble.gif",
+        done:    "https://media.tenor.com/Vw2sr_UWA6cAAAAi/pepo-party-celebrate.gif"
     };
 
-    const CONFIG = {
-        waitElementTimeout: 10000,
-        statusColumnIndex: null,
-        progressUpdateInterval: 500,
-        finalEntryDisplayTime: 1000,
-        useCache: true,
-        cacheTTL: 5000
-    };
-    const CACHE = { rows: null, rowsTimestamp: 0 };
-    const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-    async function waitForElement(selector, timeout = CONFIG.waitElementTimeout) {
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    async function waitForElement(selector, timeout = 10000) {
         const start = Date.now();
         while (Date.now() - start < timeout) {
             const el = document.querySelector(selector);
             if (el) return el;
             await sleep(100);
         }
-        throw new Error(`Timeout waiting for: ${selector}`);
+        throw new Error("No bueno - timeout waiting for: " + selector);
     }
 
     function openNextEntry() {
-        const links = JSON.parse(localStorage.getItem("dateLinks") || "[]");
-        let processed = +localStorage.getItem("processedCount") || 0;
+        let links = JSON.parse(localStorage.getItem("dateLinks") || "[]");
         if (!links.length) {
-            localStorage.clear();
+            localStorage.removeItem("dateLinks");
             window.location.href = "/salesReport/index#tab_accounting";
             return;
         }
-        processed++;
-        localStorage.setItem("processedCount", processed);
-        const next = links.shift();
+        const nextUrl = links.shift();
         localStorage.setItem("dateLinks", JSON.stringify(links));
-        window.location.href = next;
+        window.location.href = nextUrl;
     }
 
     function getRows() {
-        if (CONFIG.useCache && CACHE.rows && Date.now() - CACHE.rowsTimestamp < CONFIG.cacheTTL) {
-            return CACHE.rows;
-        }
         let rows = document.querySelectorAll('.k-grid-content table tbody tr');
         if (!rows.length) rows = document.querySelectorAll('.k-grid-content tbody tr');
-        CACHE.rows = rows;
-        CACHE.rowsTimestamp = Date.now();
         return rows;
     }
-
-    function determineStatusColumnIndex(rows) {
-        if (CONFIG.statusColumnIndex !== null) return CONFIG.statusColumnIndex;
-        const known = ["HOLD", "POSTED", "POST"];
-        if (!rows.length) return -1;
-        for (let i = 0; i < rows[0].cells.length; i++) {
-            if (known.includes(rows[0].cells[i].innerText.trim().toUpperCase())) {
-                CONFIG.statusColumnIndex = i;
-                return i;
+    function getStatusFromRow(row) {
+        let status = "";
+        for (let cell of row.cells) {
+            let txt = cell.innerText.trim().toUpperCase();
+            if (txt && txt.length > 0 && txt.length < 20 && /^[A-Z]+$/.test(txt)) {
+                status = txt;
             }
         }
-        return -1;
+        return status;
     }
-
-    function getStatusFromRow(row) {
-        const idx = determineStatusColumnIndex(getRows());
-        if (idx >= 0 && row.cells[idx]) {
-            return row.cells[idx].innerText.trim().toUpperCase();
-        }
-        for (const c of row.cells) {
-            const t = c.innerText.trim().toUpperCase();
-            if (["HOLD", "POSTED", "POST"].includes(t)) return t;
-        }
-        return "";
-    }
-
     function updateDateList(filter) {
         const list = document.getElementById("dateList");
-        if (!list) return;
-        list.innerHTML = "<p>Loading dates...</p>";
-        setTimeout(() => {
-            const rows = getRows();
-            const frag = document.createDocumentFragment();
-            let idx = 0;
-            rows.forEach(r => {
-                const dateStr = r.cells[0]?.innerText.trim();
-                const count = +r.cells[1]?.innerText.trim();
-                const status = getStatusFromRow(r);
-                const urlEl = r.querySelector('td a[href*="/sales/summary"]');
-                if (!dateStr || !count || !status || !urlEl) return;
-                if (filter && status !== filter) return;
-                const url = urlEl.href.includes('#tab_accounting') ? urlEl.href : urlEl.href + '#tab_accounting';
-                const div = document.createElement("div");
-                div.style.marginBottom = "6px";
-                div.innerHTML = `
-                    <label style="display:flex;align-items:center;">
-                        <input type="checkbox" id="chk_${idx}" data-url="${encodeURIComponent(url)}" style="margin-right:8px;">
-                        ${dateStr} - ${status}
-                    </label>`;
-                frag.appendChild(div);
-                idx++;
-            });
-            list.innerHTML = "";
-            list.appendChild(frag);
-            document.getElementById("guiState").innerText = idx ? "Dates loaded" : "No dates found";
-            document.getElementById("guiStateImg").src = STATE_IMAGES.dates;
-        }, 0);
-    }
-
-    async function updateStatusForElement(el) {
-        const from = (localStorage.getItem("statusFrom") || "POSTED").toUpperCase();
-        if (el.textContent.trim().toUpperCase() !== from) return;
-        const pk = el.dataset.pk;
-        const endpoint = el.dataset.url;
-        if (!pk || !endpoint) return;
-        const params = new URLSearchParams({ pk, name: "status", value: localStorage.getItem("statusTo") || "POST" });
-        try {
-            const res = await fetch(`${location.origin}/sales/${endpoint}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                body: params
-            });
-            if (!res.ok) throw new Error(res.statusText);
-            el.textContent = params.get("value");
-        } catch {}
-    }
-
-    async function updateAllStatusesConcurrently() {
-        const fromVal = (localStorage.getItem("statusFrom") || "POSTED").toUpperCase();
-        const els = [...document.querySelectorAll('.postingStatus')].filter(e => e.textContent.trim().toUpperCase() === fromVal);
-        const batch = 10;
-        let done = 0;
-        const ind = document.getElementById("summaryStateIndicator");
-        for (let i = 0; i < els.length; i += batch) {
-            await Promise.all(els.slice(i, i + batch).map(updateStatusForElement));
-            done += Math.min(batch, els.length - i);
-            if (ind) ind.innerHTML = `<img src="${STATE_IMAGES.posting}" style="width:24px;height:24px;vertical-align:middle;margin-right:8px;">${done}/${els.length}`;
+        if (!list) return 0;
+        list.innerHTML = "";
+        const rows = getRows();
+        if (!rows.length) {
+            list.innerHTML = "<p>No dates found.</p>";
+            return 0;
         }
+        let idx = 0;
+        Array.from(rows).forEach(row => {
+            const dateCell = row.cells[0];
+            const countCell = row.cells[1];
+            if (!dateCell || !countCell) return;
+            const dateStr = dateCell.innerText.trim();
+            const count = parseInt(countCell.innerText.trim(), 10);
+            if (isNaN(count) || count === 0) return;
+            const status = getStatusFromRow(row);
+            if (!status) return;
+            if (filter && status !== filter) return;
+            const urlEl = row.querySelector('td a[href*="/sales/summary"]');
+            if (!urlEl) return;
+            let url = urlEl.href;
+            if (!url.includes("#tab_accounting")) url += "#tab_accounting";
+            const item = document.createElement("div");
+            item.style.marginBottom = "5px";
+            item.innerHTML = `<input type="checkbox" id="chk_${idx}" data-url="${encodeURIComponent(url)}" checked>
+                              <label for="chk_${idx}">${dateStr} - ${status}</label>`;
+            list.appendChild(item);
+            idx++;
+        });
+        if (idx === 0) {
+            list.innerHTML = filter ? `<p>No dates found for status "${filter}".</p>` : `<p>No dates found.</p>`;
+        }
+        return idx;
+    }
+    const updateDateListUnfiltered = () => updateDateList(null);
+    const updateDateListFiltered = () => {
+        const filterStatus = document.getElementById("statusFrom").value.trim().toUpperCase();
+        if (!filterStatus) {
+            updateDateList(null);
+        } else {
+            updateDateList(filterStatus);
+        }
+    };
+
+    // da sauce
+    function updateStatusForElement(statusEl) {
+        return new Promise((resolve, reject) => {
+            const fromVal = localStorage.getItem("statusFrom").toUpperCase();
+            const toVal = localStorage.getItem("statusTo").toUpperCase();
+            if (!statusEl) return reject("No bueno - no status element");
+            if (statusEl.textContent.trim().toUpperCase() !== fromVal) return resolve();
+
+            const pk = statusEl.id || statusEl.getAttribute("data-pk");
+            if (!pk) return reject("No bueno - no ID found for status element");
+
+            const fullUrl = "https://app.shogo.io/sales/updateJournalEntry";
+            const params = new URLSearchParams();
+            params.append("name", pk);
+            params.append("value", toVal);
+            params.append("pk", pk);
+
+            fetch(fullUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+                body: params.toString()
+            })
+            .then(response => {
+                if (!response.ok) throw new Error("No bueno - update failed: " + response.statusText);
+                return response.text();
+            })
+            .then(() => {
+                statusEl.textContent = toVal;
+                statusEl.setAttribute("data-value", toVal);
+                resolve();
+            })
+            .catch(err => reject(err));
+        });
+    }
+    async function updateAllStatusesConcurrently() {
+        const fromVal = localStorage.getItem("statusFrom").toUpperCase();
+        const statuses = Array.from(document.querySelectorAll('.postingStatus'))
+            .filter(el => el.textContent.trim().toUpperCase() === fromVal);
+        await Promise.all(statuses.map(el => updateStatusForElement(el)));
     }
 
     async function resumeSummary() {
-        let ind = document.getElementById("summaryStateIndicator");
-        if (!ind) {
-            ind = document.createElement("div"); ind.id = "summaryStateIndicator";
-            Object.assign(ind.style, { position: "fixed", top: "20px", right: "20px", padding: "10px", background: "#fff", border: "1px solid #ccc", borderRadius: "8px", boxShadow: "0 2px 6px rgba(0,0,0,0.15)" });
-            document.body.appendChild(ind);
+        let indicator = document.getElementById("summaryStateIndicator");
+        if (!indicator) {
+            indicator = document.createElement("div");
+            indicator.id = "summaryStateIndicator";
+            Object.assign(indicator.style, {
+                position: "fixed",
+                top: "20px",
+                right: "20px",
+                zIndex: "10000",
+                fontFamily: "Arial, sans-serif",
+                fontSize: "16px",
+                padding: "8px",
+                background: "rgba(255,255,255,0.9)",
+                border: "1px solid #ccc",
+                borderRadius: "8px",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.2)"
+            });
+            document.body.appendChild(indicator);
         }
-        ind.innerHTML = `<img src="${STATE_IMAGES.posting}" style="width:24px;height:24px;vertical-align:middle;margin-right:8px;">Starting...`;
-        try { await waitForElement('.postingStatus'); } catch {}
-        await updateAllStatusesConcurrently();
-        const remaining = JSON.parse(localStorage.getItem("dateLinks") || "[]").length;
-        if (remaining === 0) {
-            ind.innerHTML = `<img src="${STATE_IMAGES.done}" style="width:24px;height:24px;vertical-align:middle;margin-right:8px;">Done!`;
-            await sleep(CONFIG.finalEntryDisplayTime);
-        }
-        ind.remove(); openNextEntry();
-    }
-
-    function createGUI() {
-        const panel = document.createElement("div");
-        Object.assign(panel.style, { position: "fixed", top: "20px", right: "20px", width: "320px", background: "#f2f2f5", padding: "20px", borderRadius: "12px", boxShadow: "0 4px 12px rgba(0,0,0,0.1)", fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif", fontSize: "14px", color: "#1c1c1e" });
-        panel.innerHTML = `
-            <div style="display:flex;align-items:center;margin-bottom:12px;"><img id="guiStateImg" src="${STATE_IMAGES.waiting}" style="width:24px;height:24px;margin-right:8px;"><span id="guiState" style="font-weight:600;">Waiting on dates</span></div>
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;"><div style="flex:1;display:flex;align-items:center;margin-right:8px;"><span style="margin-right:4px;font-weight:500;">From:</span><select id="statusFrom" style="flex:1;padding:6px;border:1px solid #ccc;border-radius:6px;background:#fff;"><option>HOLD</option><option selected>POSTED</option><option>POST</option></select></div><div style="font-size:16px;margin:0 4px;">→</div><div style="flex:1;display:flex;align-items:center;margin-left:8px;"><span style="margin-right:4px;font-weight:500;">To:</span><select id="statusTo" style="flex:1;padding:6px;border:1px solid #ccc;border-radius:6px;background:#fff;"><option selected>POST</option><option>HOLD</option><option>POSTED</option></select></div></div>
-            <button id="filterStatusBtn" style="width:100%;padding:8px;margin-bottom:12px;border:none;border-radius:6px;background:#007aff;color:#fff;cursor:pointer;">Filter</button>
-            <div id="dateList" style="max-height:180px;overflow-y:auto;margin-bottom:12px;"></div>
-            <div style="display:flex;justify-content:space-between;margin-bottom:12px;"><button id="selectAllBtn" style="flex:1;margin-right:8px;padding:8px;border:none;border-radius:6px;background:#e5eea;color:#1c1c1e;cursor:pointer;">Select All</button><button id="deselectAllBtn" style="flex:1;padding:8px;border:none;border-radius:6px;background:#e5e5ea;color:#1c1c1e;cursor:pointer;">Deselect All</button></div>
-            <button id="startAutoPostBtn" style="width:100%;padding:10px;border:none;border-radius:6px;background:#007aff;color:#fff;cursor:pointer;">Start Auto Post</button>
-        `;
-        document.body.appendChild(panel);
-
-        document.getElementById("filterStatusBtn").addEventListener("click", function() { updateDateList(document.getElementById("statusFrom").value); });
-        document.getElementById("selectAllBtn").addEventListener("click", function() { document.querySelectorAll("#dateList input").forEach(function(c){ c.checked = true; }); });
-        document.getElementById("deselectAllBtn").addEventListener("click", function() { document.querySelectorAll("#dateList input").forEach(function(c){ c.checked = false; }); });
-        document.getElementById("startAutoPostBtn").addEventListener("click", function() {
-            const fromVal = document.getElementById("statusFrom").value;
-            const toVal = document.getElementById("statusTo").value;
-            // Prevent no-op: same status
-            if (fromVal === toVal) {
-                try {
-                    const boomAudio = new Audio('https://www.myinstants.com/media/sounds/vine-boom.mp3');
-                    boomAudio.play();
-                } catch {}
-                panel.style.transition = 'background 0.3s'; panel.style.background = '#ff4d4f';
-                setTimeout(function() { panel.style.background = '#f2f2f5'; }, 300);
-                setTimeout(function() { alert(`Can’t change status from ${fromVal} to itself!`); }, 100);
-                return;
+        function updateSummaryState(state) {
+            if (state === "posting") {
+                indicator.innerHTML = '<img src="' + STATE_IMAGES.posting + '" style="width:24px; height:24px; vertical-align:middle; margin-right:8px;">Auto posting...';
+            } else if (state === "done") {
+                indicator.innerHTML = '<img src="' + STATE_IMAGES.done + '" style="width:24px; height:24px; vertical-align:middle; margin-right:8px;">Done posting!';
             }
-            localStorage.setItem("statusFrom", fromVal);
-            localStorage.setItem("statusTo", toVal);
-            const urls = Array.from(document.querySelectorAll("#dateList input:checked")).map(function(c) { return decodeURIComponent(c.dataset.url); });
-            if (!urls.length) return alert("Pick at least one date!");
-            localStorage.setItem("dateLinks", JSON.stringify(urls));
-            localStorage.setItem("totalCount", urls.length);
-            localStorage.setItem("processedCount", 0);
-            panel.remove();
-            openNextEntry();
-        });
+        }
+        updateSummaryState("posting");
+        try {
+            await waitForElement('.postingStatus', 10000);
+            await updateAllStatusesConcurrently();
+        } catch (e) {
+            console.error("No bueno - error during status update:", e);
+        }
+        let remaining = JSON.parse(localStorage.getItem("dateLinks") || "[]").length;
+        if (remaining === 0) {
+            updateSummaryState("done");
+            await sleep(1500);
+        }
+        if (indicator.parentNode) indicator.parentNode.removeChild(indicator);
+        openNextEntry();
     }
+    // collapsible GUI
+    function createGUI() {
+        let panel = document.getElementById("autoPostGUI");
+        if (!panel) {
+            panel = document.createElement("div");
+            panel.id = "autoPostGUI";
+            Object.assign(panel.style, {
+                position: "fixed",
+                bottom: "20px",
+                right: "20px",
+                width: "320px",
+                maxHeight: "70vh",
+                background: "rgba(255,255,255,0.95)",
+                border: "1px solid #ccc",
+                borderRadius: "12px",
+                zIndex: "10000",
+                boxShadow: "0 4px 16px rgba(0,0,0,0.2)",
+                fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+                fontSize: "14px",
+                color: "#333",
+                transition: "all 0.3s ease"
+            });
+            panel.innerHTML =
+                '<div id="guiHeader" style="display:flex; align-items:center; justify-content:space-between; padding:15px; background:#f8f9fa; border-bottom:1px solid #ddd; border-radius:12px 12px 0 0; cursor:pointer;">' +
+                    '<div style="display:flex; align-items:center;">' +
+                        '<img id="guiStateImg" src="' + STATE_IMAGES.waiting + '" style="width:24px; height:24px; margin-right:8px;"/>' +
+                        '<span id="guiState" style="font-weight:bold;">Waiting on dates</span>' +
+                    '</div>' +
+                    '<span id="collapseBtn" style="font-size:18px; font-weight:bold; user-select:none;">−</span>' +
+                '</div>' +
+                '<div id="guiContent" style="padding:15px; max-height:calc(70vh - 60px); overflow-y:auto;">' +
+                    '<div id="statusConversion" style="margin-bottom:15px;">' +
+                        '<div style="margin-bottom:8px;">' +
+                            '<label for="statusFrom" style="display:block; margin-bottom:4px; font-weight:500;">From Status:</label> ' +
+                            '<input type="text" id="statusFrom" list="statusFromList" value="" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px;" placeholder="Select or type status"/>' +
+                            '<datalist id="statusFromList">' +
+                                '<option value="POST">' +
+                                '<option value="UPDATE">' +
+                                '<option value="NONE">' +
+                                '<option value="POSTED">' +
+                                '<option value="UPDATED">' +
+                                '<option value="HOLD">' +
+                                '<option value="AWAITING_SYNC">' +
+                            '</datalist>' +
+                        '</div>' +
+                        '<div style="margin-bottom:8px;">' +
+                            '<label for="statusTo" style="display:block; margin-bottom:4px; font-weight:500;">To Status:</label> ' +
+                            '<input type="text" id="statusTo" list="statusToList" value="" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px;" placeholder="Select or type status"/>' +
+                            '<datalist id="statusToList">' +
+                                '<option value="POST">' +
+                                '<option value="UPDATE">' +
+                                '<option value="NONE">' +
+                                '<option value="POSTED">' +
+                                '<option value="UPDATED">' +
+                                '<option value="HOLD">' +
+                                '<option value="AWAITING_SYNC">' +
+                            '</datalist>' +
+                        '</div>' +
+                    '</div>' +
+                    '<button id="filterStatusBtn" style="margin-bottom:10px; width:100%; padding:6px; background:#28a745; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:500;">Filter by Status</button>' +
+                    '<div id="dateList" style="margin-bottom:10px; max-height:200px; overflow-y:auto; border:1px solid #e0e0e0; border-radius:4px; padding:8px;"></div>' +
+                    '<div style="display:flex; justify-content:space-between; margin-bottom:10px; gap:8px;">' +
+                        '<button id="selectAllBtn" style="flex:1; padding:6px; background:#007aff; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">Select All</button>' +
+                        '<button id="deselectAllBtn" style="flex:1; padding:6px; background:#6c757d; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px;">Deselect All</button>' +
+                    '</div>' +
+                    '<button id="startAutoPostBtn" style="width:100%; padding:10px; background:#007aff; color:#fff; border:none; border-radius:4px; cursor:pointer; font-weight:600; font-size:15px;">Start Auto Post</button>' +
+                '</div>';
+            document.body.appendChild(panel);
 
-    function init() {
-        const path = location.pathname;
-        if (path.includes('/salesReport')) {
-            waitForElement('.k-grid-content tbody').then(createGUI).catch(function(){ alert('Load failed!'); });
-        } else if (path.includes('/sales/summary')) {
-            window.addEventListener('load', resumeSummary);
-            setTimeout(resumeSummary, CONFIG.waitElementTimeout + 5000);
+            let isCollapsed = false;
+            const guiContent = document.getElementById("guiContent");
+            const collapseBtn = document.getElementById("collapseBtn");
+            const guiHeader = document.getElementById("guiHeader");
+
+            guiHeader.addEventListener("click", () => {
+                isCollapsed = !isCollapsed;
+                if (isCollapsed) {
+                    guiContent.style.display = "none";
+                    collapseBtn.textContent = "+";
+                    panel.style.maxHeight = "auto";
+                } else {
+                    guiContent.style.display = "block";
+                    collapseBtn.textContent = "−";
+                    panel.style.maxHeight = "70vh";
+                }
+            });
+            document.getElementById("selectAllBtn").addEventListener("click", () => {
+                document.querySelectorAll("#dateList input[type='checkbox']").forEach(chk => chk.checked = true);
+            });
+            document.getElementById("deselectAllBtn").addEventListener("click", () => {
+                document.querySelectorAll("#dateList input[type='checkbox']").forEach(chk => chk.checked = false);
+            });
+            document.getElementById("filterStatusBtn").addEventListener("click", updateDateListFiltered);
+            document.getElementById("startAutoPostBtn").addEventListener("click", async () => {
+                document.getElementById("guiState").innerText = "Auto posting...";
+                document.getElementById("guiStateImg").src = STATE_IMAGES.posting;
+                const fromVal = document.getElementById("statusFrom").value.trim().toUpperCase();
+                const toVal = document.getElementById("statusTo").value.trim().toUpperCase();
+
+                if (!fromVal || !toVal) {
+                    alert("Please enter both 'From' and 'To' status values.");
+                    return;
+                }
+
+                localStorage.setItem("statusFrom", fromVal);
+                localStorage.setItem("statusTo", toVal);
+                const selected = [];
+                document.querySelectorAll("#dateList input[type='checkbox']").forEach(chk => {
+                    if (chk.checked) selected.push(decodeURIComponent(chk.getAttribute("data-url")));
+                });
+                if (!selected.length) {
+                    alert("Please select at least one date.");
+                    return;
+                }
+                localStorage.setItem("dateLinks", JSON.stringify(selected));
+                panel.remove();
+                openNextEntry();
+            });
+        }
+        const dateCount = updateDateListUnfiltered();
+        const headerImg = panel.querySelector("#guiStateImg");
+        const headerState = panel.querySelector("#guiState");
+        if (headerImg && headerState) {
+            if (dateCount > 0) {
+                headerState.innerText = "Dates loaded";
+                headerImg.src = STATE_IMAGES.dates;
+            } else {
+                headerState.innerText = "No dates found";
+                headerImg.src = STATE_IMAGES.waiting;
+            }
         }
     }
 
-    init();
+    function attachRefreshListener() {
+        const refreshBtn = document.getElementById("refresh-btn");
+        if (refreshBtn) {
+            refreshBtn.addEventListener("click", () => {
+                setTimeout(updateDateListUnfiltered, 2000);
+            });
+        } else {
+            console.warn("Refresh button (#refresh-btn) not found.");
+        }
+    }
+
+    if (location.pathname.includes('/salesReport')) {
+        waitForElement('.k-grid-content table tbody', 15000)
+            .then(() => { createGUI(); attachRefreshListener(); })
+            .catch(e => console.error("No bueno - table not found:", e));
+    } else if (location.pathname.includes('/sales/summary')) {
+        window.addEventListener("load", resumeSummary);
+    }
 })();
