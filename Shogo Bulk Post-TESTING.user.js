@@ -18,6 +18,12 @@
         done:    "https://media.tenor.com/Vw2sr_UWA6cAAAAi/pepo-party-celebrate.gif"
     };
 
+    // Column indices for status columns (0-indexed)
+    const STATUS_COLUMNS = {
+        sales: 13,
+        drawer: 14
+    };
+
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     async function waitForElement(selector, timeout = 10000) {
         const start = Date.now();
@@ -46,16 +52,28 @@
         if (!rows.length) rows = document.querySelectorAll('.k-grid-content tbody tr');
         return rows;
     }
-    function getStatusFromRow(row) {
-        let status = "";
-        for (let cell of row.cells) {
-            let txt = cell.innerText.trim().toUpperCase();
-            if (txt && txt.length > 0 && txt.length < 20 && /^[A-Z]+$/.test(txt)) {
-                status = txt;
-            }
+
+    function getSelectedColumnIndex() {
+        const columnSelect = document.getElementById("statusColumn");
+        if (columnSelect) {
+            return STATUS_COLUMNS[columnSelect.value] || STATUS_COLUMNS.sales;
         }
-        return status;
+        return STATUS_COLUMNS.sales;
     }
+
+    function getStatusFromRow(row, columnIndex = null) {
+        if (columnIndex === null) {
+            columnIndex = getSelectedColumnIndex();
+        }
+        const cell = row.cells[columnIndex];
+        if (!cell) return "";
+        let txt = cell.innerText.trim().toUpperCase();
+        if (txt && /^[A-Z_]+$/.test(txt)) {
+            return txt;
+        }
+        return "";
+    }
+
     function updateDateList(filter) {
         const list = document.getElementById("dateList");
         if (!list) return 0;
@@ -65,6 +83,7 @@
             list.innerHTML = "<p>No dates found.</p>";
             return 0;
         }
+        const columnIndex = getSelectedColumnIndex();
         let idx = 0;
         Array.from(rows).forEach(row => {
             const dateCell = row.cells[0];
@@ -73,8 +92,9 @@
             const dateStr = dateCell.innerText.trim();
             const count = parseInt(countCell.innerText.trim(), 10);
             if (isNaN(count) || count === 0) return;
-            const status = getStatusFromRow(row);
+            const status = getStatusFromRow(row, columnIndex);
             if (!status) return;
+            if (filter && status.length !== filter.length) return;
             if (filter && status !== filter) return;
             const urlEl = row.querySelector('td a[href*="/sales/summary"]');
             if (!urlEl) return;
@@ -185,6 +205,7 @@
         if (indicator.parentNode) indicator.parentNode.removeChild(indicator);
         openNextEntry();
     }
+
     // collapsible GUI
     function createGUI() {
         let panel = document.getElementById("autoPostGUI");
@@ -216,6 +237,13 @@
                     '<span id="collapseBtn" style="font-size:18px; font-weight:bold; user-select:none;">−</span>' +
                 '</div>' +
                 '<div id="guiContent" style="padding:15px; max-height:calc(70vh - 60px); overflow-y:auto;">' +
+                    '<div id="columnSelector" style="margin-bottom:15px;">' +
+                        '<label for="statusColumn" style="display:block; margin-bottom:4px; font-weight:500;">Status Column:</label>' +
+                        '<select id="statusColumn" style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-size:13px; background:#fff;">' +
+                            '<option value="sales">Sales</option>' +
+                            '<option value="drawer">Drawer</option>' +
+                        '</select>' +
+                    '</div>' +
                     '<div id="statusConversion" style="margin-bottom:15px;">' +
                         '<div style="margin-bottom:8px;">' +
                             '<label for="statusFrom" style="display:block; margin-bottom:4px; font-weight:500;">From Status:</label> ' +
@@ -271,6 +299,17 @@
                     panel.style.maxHeight = "70vh";
                 }
             });
+
+            // Re-filter when column changes
+            document.getElementById("statusColumn").addEventListener("change", () => {
+                const filterStatus = document.getElementById("statusFrom").value.trim().toUpperCase();
+                if (filterStatus) {
+                    updateDateListFiltered();
+                } else {
+                    updateDateListUnfiltered();
+                }
+            });
+
             document.getElementById("selectAllBtn").addEventListener("click", () => {
                 document.querySelectorAll("#dateList input[type='checkbox']").forEach(chk => chk.checked = true);
             });
