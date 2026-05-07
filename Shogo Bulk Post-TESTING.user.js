@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shogo Auto Post
 // @namespace    Accounting Esc
-// @version      TEST.6
+// @version      TEST.7
 // @description  On the Sales Report page, select dates using a collapsible GUI with custom status input. On the Sales Summary page, update statuses via direct API calls.
 // @match        https://app.shogo.io/*
 // @grant        none
@@ -272,13 +272,8 @@
             const endpoint = statusEl.getAttribute("data-url") || "updateReceipt";
             const fullUrl = "https://app.shogo.io/sales/" + endpoint;
             const params = new URLSearchParams();
-            if (endpoint === "updateJournalEntry") {
-                params.append("pk", pk);
-                params.append("value", toVal);
-            } else {
-                params.append("0[name]", pk);
-                params.append("0[value]", toVal);
-            }
+            params.append("pk", pk);
+            params.append("value", toVal);
 
             fetch(fullUrl, {
                 method: "POST",
@@ -301,7 +296,12 @@
         const fromVal = localStorage.getItem("statusFrom").toUpperCase();
         const statuses = Array.from(document.querySelectorAll('.postingStatus'))
             .filter(el => (el.value || "").toUpperCase() === fromVal);
-        await Promise.all(statuses.map(el => updateStatusForElement(el)));
+        const results = await Promise.allSettled(statuses.map(el => updateStatusForElement(el)));
+        const failed = results.filter(r => r.status === "rejected");
+        if (failed.length) {
+            failed.forEach(r => console.error("No bueno - update failed:", r.reason));
+        }
+        return { total: statuses.length, ok: statuses.length - failed.length, failed: failed.length };
     }
 
     async function resumeSummary() {
@@ -331,8 +331,9 @@
         }
         function updateSummaryState(state, msg) {
             const states = {
-                posting: { img: STATE_IMAGES.posting, label: "Auto posting…" },
-                done:    { img: STATE_IMAGES.done,    label: "Done posting!" },
+                posting: { img: STATE_IMAGES.posting, label: msg || "Auto posting…" },
+                done:    { img: STATE_IMAGES.done,    label: msg || "Done posting!" },
+                partial: { img: STATE_IMAGES.waiting, label: msg || "Done with errors" },
                 error:   { img: STATE_IMAGES.waiting, label: msg || "Error during posting" }
             };
             const cfg = states[state];
@@ -342,19 +343,25 @@
         }
         updateSummaryState("posting");
         let hadError = false;
+        let summary = null;
         try {
             await waitForElement('.postingStatus', 10000);
-            await updateAllStatusesConcurrently();
+            summary = await updateAllStatusesConcurrently();
         } catch (e) {
             hadError = true;
             console.error("No bueno - error during status update:", e);
             updateSummaryState("error", `Error: ${e.message || e}`);
             await sleep(1500);
         }
-        let remaining = JSON.parse(localStorage.getItem("dateLinks") || "[]").length;
-        if (remaining === 0 && !hadError) {
-            updateSummaryState("done");
-            await sleep(1500);
+        const remaining = JSON.parse(localStorage.getItem("dateLinks") || "[]").length;
+        if (!hadError && summary) {
+            if (summary.failed > 0) {
+                updateSummaryState("partial", `${summary.ok}/${summary.total} ok · ${summary.failed} failed`);
+                await sleep(2500);
+            } else if (remaining === 0) {
+                updateSummaryState("done");
+                await sleep(1500);
+            }
         }
         if (indicator.parentNode) indicator.parentNode.removeChild(indicator);
         openNextEntry();
