@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shogo Auto Post
 // @namespace    Accounting Esc
-// @version      TEST.7
+// @version      TEST.8
 // @description  On the Sales Report page, select dates using a collapsible GUI with custom status input. On the Sales Summary page, update statuses via direct API calls.
 // @match        https://app.shogo.io/*
 // @grant        none
@@ -304,6 +304,49 @@
         return { total: statuses.length, ok: statuses.length - failed.length, failed: failed.length };
     }
 
+    function updateSyncedForElement(syncedEl) {
+        return new Promise((resolve, reject) => {
+            if (!syncedEl) return reject("No bueno - no sync element");
+            if ((syncedEl.value || "").toLowerCase() !== "true") return resolve();
+
+            const pk = syncedEl.getAttribute("data-pk");
+            if (!pk) return reject("No bueno - no data-pk on sync element");
+
+            const endpoint = syncedEl.getAttribute("data-url") || "updateJournalEntrySynced";
+            const fullUrl = "https://app.shogo.io/sales/" + endpoint;
+            const params = new URLSearchParams();
+            params.append("pk", pk);
+            params.append("value", "false");
+
+            fetch(fullUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" },
+                body: params.toString()
+            })
+            .then(response => {
+                if (!response.ok) throw new Error("No bueno - sync update failed: " + response.statusText);
+                return response.text();
+            })
+            .then(() => {
+                syncedEl.value = "false";
+                syncedEl.dispatchEvent(new Event("change", { bubbles: true }));
+                resolve();
+            })
+            .catch(err => reject(err));
+        });
+    }
+
+    async function updateAllSyncedToFalse() {
+        const elements = Array.from(document.querySelectorAll('.synced'))
+            .filter(el => (el.value || "").toLowerCase() === "true");
+        const results = await Promise.allSettled(elements.map(el => updateSyncedForElement(el)));
+        const failed = results.filter(r => r.status === "rejected");
+        if (failed.length) {
+            failed.forEach(r => console.error("No bueno - sync flip failed:", r.reason));
+        }
+        return { total: elements.length, ok: elements.length - failed.length, failed: failed.length };
+    }
+
     async function resumeSummary() {
         let indicator = document.getElementById("summaryStateIndicator");
         if (!indicator) {
@@ -346,7 +389,15 @@
         let summary = null;
         try {
             await waitForElement('.postingStatus', 10000);
-            summary = await updateAllStatusesConcurrently();
+            const [statusSummary, syncedSummary] = await Promise.all([
+                updateAllStatusesConcurrently(),
+                updateAllSyncedToFalse()
+            ]);
+            summary = {
+                total:  statusSummary.total  + syncedSummary.total,
+                ok:     statusSummary.ok     + syncedSummary.ok,
+                failed: statusSummary.failed + syncedSummary.failed
+            };
         } catch (e) {
             hadError = true;
             console.error("No bueno - error during status update:", e);
