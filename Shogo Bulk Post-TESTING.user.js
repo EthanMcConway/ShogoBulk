@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Shogo Auto Post
 // @namespace    Accounting Esc
-// @version      TEST.8
+// @version      TEST.9
 // @description  On the Sales Report page, select dates using a collapsible GUI with custom status input. On the Sales Summary page, update statuses via direct API calls.
 // @match        https://app.shogo.io/*
 // @grant        none
@@ -29,6 +29,11 @@
         'OOB','FAILED','BATCHHOLD','PARENT','OPENCHECK','HOLD','CLEAR','LINK',
         'POSTED','POST','NONE','DELETEFAILED','DELETE','DELETED','AWAITING_SYNC'
     ];
+
+    // When the user moves status TO one of these, skip flipping Synced→false.
+    // Rationale: moving to POSTED/UPDATED finalises the date; flipping synced
+    // would tell Shogo to re-sync, which defeats the purpose.
+    const SKIP_SYNC_FLIP_FOR = new Set(['POSTED', 'UPDATED']);
 
     const GUI_STATES = {
         waiting: { img: 'waiting', label: 'Waiting on dates' },
@@ -389,9 +394,13 @@
         let summary = null;
         try {
             await waitForElement('.postingStatus', 10000);
+            const toVal = (localStorage.getItem("statusTo") || "").toUpperCase();
+            const skipSync = SKIP_SYNC_FLIP_FOR.has(toVal);
             const [statusSummary, syncedSummary] = await Promise.all([
                 updateAllStatusesConcurrently(),
-                updateAllSyncedToFalse()
+                skipSync
+                    ? Promise.resolve({ total: 0, ok: 0, failed: 0 })
+                    : updateAllSyncedToFalse()
             ]);
             summary = {
                 total:  statusSummary.total  + syncedSummary.total,
